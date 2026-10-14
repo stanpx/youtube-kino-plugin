@@ -1,0 +1,54 @@
+{
+  "id": "youtube-player",
+  "name": "YouTube Player",
+  "version": "1.0.0",
+  "apiVersion": 6,
+  "entry": "plugin.js",
+  "description": "Busca y reproduce videos públicos de YouTube utilizando la API oficial de Google de forma directa.",
+  "author": "stanpx",
+  "homepage": "https://github.com/stanpx/youtube-kino-plugin",
+  "hosts": [
+    "googleapis.com",
+    "*.googleapis.com",
+    "accounts.google.com",
+    "youtube.com",
+    "*.youtube.com",
+    "youtu.be",
+    "i.ytimg.com",
+    "*.ytimg.com",
+    "*.googlevideo.com"
+  ],
+  "streamHosts": "any",
+  "capabilities": [
+    "search",
+    "home",
+    "browse",
+    "episodes",
+    "resolve"
+  ],
+  "color": "#FF0000",
+  "icon": "icon.png",
+  "secrets": {
+    "mi_clave": "kino-sealed:v1:kbNH7xkD7eiAuoFKS57FLDTurpMSYe26drscCxmSaUIye529pJBOaNU90QIldPdTT-oqjH8Rhr-bcCdKxlm9G_K5VhyHnzoFHLBi7vfqcblh3X5BJghQWJrIFTOiHF8",
+    "client_id": "kino-sealed:v1:J37NSHRETAEMt3ZxdJ4D87f_80yT7W5H60GSPdImpXRMbOmTnW6uySIiqoqnzGiVoP1Wqj6R6XXQtJiyaAnORXZRgdQlqpFBQVvrgPtD-SV8nz_1fxtSIxA44vy47LjrrFDVo5voNT1lmx_T_-LcjblR0Nh6WBCrGQ-XHgBVyqSxlEA7",
+    "client_secret": "kino-sealed:v1:FrnbYDLpMVQXguMwtcSlZkFSaUXOFvTXb7t_wxxwvXiDn_K7X999EMyCxn12Y4G5AifnQIyrQ9cnnOdcU6C-DEXj-U4wa_NVLoeASqxHLvoOsUeB04VbN3X3WrMYM7w"
+  },
+  "settings": [
+    {
+      "key": "api_key",
+      "label": "YouTube Data API v3 Key (Opcional)",
+      "type": "password",
+      "hint": "Clave AIzaSy... de Google Cloud para consultas directas"
+    },
+    {
+      "key": "region_code",
+      "label": "Código de región (ISO)",
+      "type": "text",
+      "hint": "Ej: AR, ES, MX, US (por defecto AR)"
+    }
+  ],
+  "signature": {
+    "authorKey": "6f5fc734f744d974a1fe0c21a0e7edf6e0c9ff2e35a01ffc12d9abad629d55ef",
+    "value": "425be437578f63024a4dac7f5332b27cd318f25ddbaffa2876c7cf7645265e6f9fe8c937b9b5688871b987d3c3560df352497067007443095df84d869b974607"
+  }
+}
