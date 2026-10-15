@@ -18,6 +18,13 @@ function getRegionCode() {
   return /^[A-Z]{2}$/.test(raw) ? raw : "AR";
 }
 
+function getPreferredLang() {
+  const raw = (kino.config && typeof kino.config.preferred_lang === "string")
+    ? kino.config.preferred_lang.trim().toLowerCase()
+    : "";
+  return /^[a-z]{2}(-[a-z0-9]+)?$/i.test(raw) ? raw : "es";
+}
+
 async function getAuthCredentials() {
   const userApiKey = (kino.config && typeof kino.config.api_key === "string")
     ? kino.config.api_key.trim()
@@ -127,12 +134,13 @@ async function ytDataApiFetch(endpoint, params = {}) {
 
 async function ytInnertubeFetch(endpoint, payload) {
   const region = getRegionCode();
+  const prefLang = getPreferredLang();
   const body = {
     context: {
       client: {
         clientName: "WEB",
         clientVersion: "2.20250101.00.00",
-        hl: "es",
+        hl: prefLang,
         gl: region
       }
     },
@@ -655,6 +663,93 @@ function extractVideoId(ref) {
   return clean;
 }
 
+function extractSubtitlesAndAudio(data, prefLang) {
+  const subList = [];
+  const captionTracks = data
+    && data.captions
+    && data.captions.playerCaptionsTracklistRenderer
+    && data.captions.playerCaptionsTracklistRenderer.captionTracks;
+
+  let hasPrefSub = false;
+  let translatableTrack = null;
+
+  if (Array.isArray(captionTracks)) {
+    for (const track of captionTracks) {
+      if (!track || !track.baseUrl) continue;
+      const langCode = String(track.languageCode || "es");
+      if (langCode === prefLang || langCode.startsWith(prefLang + "-")) {
+        hasPrefSub = true;
+      }
+      if (track.isTranslatable && !translatableTrack) {
+        translatableTrack = track;
+      }
+      const vttUrl = track.baseUrl.includes("fmt=")
+        ? track.baseUrl.replace(/fmt=[^&]+/, "fmt=vtt")
+        : track.baseUrl + "&fmt=vtt";
+      subList.push({
+        lang: langCode,
+        url: vttUrl,
+        format: "vtt",
+        label: extractText(track.name) || langCode,
+        translated: false
+      });
+    }
+
+    if (!hasPrefSub && translatableTrack && translatableTrack.baseUrl) {
+      const baseVtt = translatableTrack.baseUrl.includes("fmt=")
+        ? translatableTrack.baseUrl.replace(/fmt=[^&]+/, "fmt=vtt")
+        : translatableTrack.baseUrl + "&fmt=vtt";
+      subList.push({
+        lang: prefLang,
+        url: baseVtt + "&tlang=" + encodeURIComponent(prefLang),
+        format: "vtt",
+        label: prefLang.toUpperCase() + " (Traducción automática)",
+        translated: true
+      });
+    }
+
+    subList.sort((a, b) => {
+      const aMatch = (a.lang === prefLang || a.lang.startsWith(prefLang + "-")) ? 0 : 1;
+      const bMatch = (b.lang === prefLang || b.lang.startsWith(prefLang + "-")) ? 0 : 1;
+      return aMatch - bMatch;
+    });
+  }
+
+  const audioList = [];
+  const seenAudio = new Set();
+  const adaptive = (data && data.streamingData && Array.isArray(data.streamingData.adaptiveFormats))
+    ? data.streamingData.adaptiveFormats
+    : [];
+
+  const audioFormats = adaptive
+    .filter(f => f && typeof f.url === "string" && f.url.startsWith("https://") && String(f.mimeType || "").startsWith("audio/"))
+    .sort((a, b) => (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0));
+
+  for (const fmt of audioFormats) {
+    const trackInfo = fmt.audioTrack || {};
+    const rawId = String(trackInfo.id || "");
+    const langCode = rawId ? rawId.split(".")[0] : "";
+    const label = trackInfo.displayName || langCode || "Audio original";
+    const key = langCode || label;
+    if (seenAudio.has(key)) continue;
+    seenAudio.add(key);
+
+    audioList.push({
+      lang: langCode || prefLang,
+      url: fmt.url,
+      label: trackInfo.audioIsDefault ? label + " (Predeterminado)" : label
+    });
+  }
+
+  audioList.sort((a, b) => {
+    const aPref = (a.lang === prefLang || a.lang.startsWith(prefLang + "-")) ? 0 : 1;
+    const bPref = (b.lang === prefLang || b.lang.startsWith(prefLang + "-")) ? 0 : 1;
+    return aPref - bPref;
+  });
+
+  return { subtitles: subList, audioTracks: audioList };
+}
+
 export async function resolve(ref) {
   const videoId = extractVideoId(ref);
   if (!videoId) {
@@ -666,6 +761,7 @@ export async function resolve(ref) {
     id: videoId
   });
 
+  const prefLang = getPreferredLang();
   const clients = [
     {
       clientName: "IOS",
@@ -702,7 +798,7 @@ export async function resolve(ref) {
             deviceModel: client.deviceModel,
             osName: client.osName,
             osVersion: client.osVersion,
-            hl: "es",
+            hl: prefLang,
             gl: getRegionCode()
           },
           thirdParty: {
@@ -728,27 +824,7 @@ export async function resolve(ref) {
       const streamingData = data && data.streamingData;
       if (!streamingData) continue;
 
-      const subtitles = [];
-      const captionTracks = data
-        && data.captions
-        && data.captions.playerCaptionsTracklistRenderer
-        && data.captions.playerCaptionsTracklistRenderer.captionTracks;
-
-      if (Array.isArray(captionTracks)) {
-        for (const track of captionTracks) {
-          if (track && track.baseUrl) {
-            const vttUrl = track.baseUrl.includes("fmt=")
-              ? track.baseUrl
-              : `${track.baseUrl}&fmt=vtt`;
-            subtitles.push({
-              lang: String(track.languageCode || "es"),
-              url: vttUrl,
-              format: "vtt",
-              label: extractText(track.name) || String(track.languageCode || "es")
-            });
-          }
-        }
-      }
+      const { subtitles, audioTracks } = extractSubtitlesAndAudio(data, prefLang);
 
       const alternatives = [];
       const combinedFormats = [
@@ -773,6 +849,7 @@ export async function resolve(ref) {
           mime: "application/x-mpegURL",
           headers: { "User-Agent": client.userAgent },
           subtitles: subtitles.length > 0 ? subtitles : undefined,
+          audioTracks: audioTracks.length > 0 ? audioTracks : undefined,
           alternatives: alternatives.length > 0 ? alternatives.slice(0, 5) : undefined,
           expiresInSeconds: Number(streamingData.expiresInSeconds) || 21600
         };
@@ -789,6 +866,7 @@ export async function resolve(ref) {
           mime: "video/mp4",
           headers: { "User-Agent": client.userAgent },
           subtitles: subtitles.length > 0 ? subtitles : undefined,
+          audioTracks: audioTracks.length > 0 ? audioTracks : undefined,
           alternatives: progressiveFormats.slice(1).map(f => ({
             url: f.url,
             mime: "video/mp4",
@@ -804,6 +882,7 @@ export async function resolve(ref) {
           mime: alternatives[0].mime || "video/mp4",
           headers: { "User-Agent": client.userAgent },
           subtitles: subtitles.length > 0 ? subtitles : undefined,
+          audioTracks: audioTracks.length > 0 ? audioTracks : undefined,
           alternatives: alternatives.slice(1, 5),
           expiresInSeconds: Number(streamingData.expiresInSeconds) || 21600
         };

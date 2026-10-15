@@ -1,7 +1,7 @@
 {
   "id": "youtube-player",
   "name": "YouTube Player",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "apiVersion": 6,
   "entry": "plugin.js",
   "description": "Busca y reproduce videos públicos de YouTube utilizando la API oficial de Google de forma directa.",
@@ -45,10 +45,16 @@
       "label": "Código de región (ISO)",
       "type": "text",
       "hint": "Ej: AR, ES, MX, US (por defecto AR)"
+    },
+    {
+      "key": "preferred_lang",
+      "label": "Idioma de doblaje y subtítulos",
+      "type": "text",
+      "hint": "Ej: es, es-419, en, pt, ja (por defecto es)"
     }
   ],
   "signature": {
     "authorKey": "6f5fc734f744d974a1fe0c21a0e7edf6e0c9ff2e35a01ffc12d9abad629d55ef",
-    "value": "425be437578f63024a4dac7f5332b27cd318f25ddbaffa2876c7cf7645265e6f9fe8c937b9b5688871b987d3c3560df352497067007443095df84d869b974607"
+    "value": "7169eb8d17e0aaee2bc300db618e49ad428a82e1f64cc08e4e8718cfebfad922cd0ff523c7fea3b066acda12f40cfa0ef7fde24c837714d8482583c190cde00a"
   }
 }
