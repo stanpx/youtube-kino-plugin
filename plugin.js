@@ -253,7 +253,7 @@ function extractText(node) {
 }
 
 function collectInnertubeRenderers(root, out = [], depth = 0) {
-  if (!root || typeof root !== "object" || depth > 35 || out.length >= 40) return out;
+  if (!root || typeof root !== "object" || depth > 40 || out.length >= 45) return out;
   if (root.videoRenderer && root.videoRenderer.videoId) {
     out.push({ type: "video", data: root.videoRenderer });
     return out;
@@ -268,6 +268,10 @@ function collectInnertubeRenderers(root, out = [], depth = 0) {
   }
   if (root.gridVideoRenderer && root.gridVideoRenderer.videoId) {
     out.push({ type: "video", data: root.gridVideoRenderer });
+    return out;
+  }
+  if (root.reelItemRenderer && root.reelItemRenderer.videoId) {
+    out.push({ type: "video", data: root.reelItemRenderer });
     return out;
   }
   if (root.playlistRenderer && root.playlistRenderer.playlistId) {
@@ -285,13 +289,13 @@ function collectInnertubeRenderers(root, out = [], depth = 0) {
   if (Array.isArray(root)) {
     for (const child of root) {
       collectInnertubeRenderers(child, out, depth + 1);
-      if (out.length >= 40) break;
+      if (out.length >= 45) break;
     }
   } else {
     for (const val of Object.values(root)) {
       if (val && typeof val === "object") {
         collectInnertubeRenderers(val, out, depth + 1);
-        if (out.length >= 40) break;
+        if (out.length >= 45) break;
       }
     }
   }
@@ -302,7 +306,7 @@ function mapInnertubeEntry(entry) {
   const { type, data } = entry;
   if (type === "video") {
     const videoId = data.videoId;
-    const title = extractText(data.title) || `Video ${videoId}`;
+    const title = extractText(data.title || data.headline) || `Video ${videoId}`;
     const channelName = extractText(data.ownerText || data.longBylineText || data.shortBylineText);
     const desc = extractText(data.descriptionSnippet) || (channelName ? `Canal: ${channelName}` : "");
     return {
@@ -471,7 +475,7 @@ export async function home() {
 export async function browse(ref, cursor) {
   const cleanRef = String(ref || "cat:trending").trim();
 
-  if (cleanRef.startsWith("playlist:")) {
+  if (cleanRef.startsWith("playlist:") || cleanRef.startsWith("channel:")) {
     const epData = await episodes(cleanRef);
     const items = (epData.episodes || []).map(ep => ({
       id: `yt-v-${ep.ref.replace(/^video:/, "")}`,
@@ -483,11 +487,6 @@ export async function browse(ref, cursor) {
       overview: ep.overview || ""
     }));
     return { items };
-  }
-
-  if (cleanRef.startsWith("channel:")) {
-    const channelId = cleanRef.slice("channel:".length);
-    return await fetchItemsByQuery(channelId, { searchType: "video", pageToken: cursor || "" });
   }
 
   const catId = cleanRef.replace(/^cat:/, "");
@@ -538,6 +537,38 @@ export async function search(query) {
   });
 }
 
+function extractEpisodesFromBrowseRoot(raw, fallbackOverview = "") {
+  const renderers = collectInnertubeRenderers(raw);
+  const epList = [];
+  const seen = new Set();
+  for (const r of renderers) {
+    let vid = "";
+    let title = "";
+    let overview = "";
+    if (r.type === "video" && r.data && r.data.videoId) {
+      vid = r.data.videoId;
+      title = extractText(r.data.title || r.data.headline);
+      overview = extractText(r.data.descriptionSnippet || r.data.shortBylineText || r.data.publishedTimeText) || fallbackOverview;
+    } else if (r.type === "lockup" && r.data && String(r.data.contentId || "").length === 11) {
+      vid = String(r.data.contentId);
+      title = (r.data.metadata && r.data.metadata.lockupMetadataViewModel && r.data.metadata.lockupMetadataViewModel.title && r.data.metadata.lockupMetadataViewModel.title.content) || "";
+      overview = fallbackOverview;
+    }
+    if (vid && !seen.has(vid)) {
+      seen.add(vid);
+      epList.push({
+        season: 1,
+        number: epList.length + 1,
+        ref: `video:${vid}`,
+        title: title || `Episodio ${epList.length + 1}`,
+        still: `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`,
+        overview
+      });
+    }
+  }
+  return epList;
+}
+
 export async function episodes(ref) {
   const rawRef = String(ref || "").trim();
 
@@ -573,27 +604,22 @@ export async function episodes(ref) {
     }
 
     const browseId = playlistId.startsWith("VL") ? playlistId : `VL${playlistId}`;
-    const raw = await ytInnertubeFetch("browse", { browseId });
-    const renderers = collectInnertubeRenderers(raw);
-    const epList = [];
-    const seen = new Set();
-    for (const r of renderers) {
-      if (r.type === "video" && r.data && r.data.videoId && !seen.has(r.data.videoId)) {
-        const vid = r.data.videoId;
-        seen.add(vid);
-        epList.push({
-          season: 1,
-          number: epList.length + 1,
-          ref: `video:${vid}`,
-          title: extractText(r.data.title) || `Video ${epList.length + 1}`,
-          still: `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`,
-          overview: extractText(r.data.shortBylineText) || ""
-        });
+    try {
+      const raw = await ytInnertubeFetch("browse", { browseId });
+      const epList = extractEpisodesFromBrowseRoot(raw);
+      if (epList.length > 0) {
+        return {
+          series: { title: "Lista de reproducción de YouTube" },
+          episodes: epList
+        };
       }
+    } catch (err) {
+      kino.log("Aviso en browse de playlist:", String(err));
     }
+
     return {
       series: { title: "Lista de reproducción de YouTube" },
-      episodes: epList
+      episodes: []
     };
   }
 
@@ -611,7 +637,27 @@ export async function episodes(ref) {
       && channelData.items[0].contentDetails.relatedPlaylists.uploads;
 
     if (uploadsPlaylistId) {
-      return await episodes(`playlist:${uploadsPlaylistId}`);
+      const fromApi = await episodes(`playlist:${uploadsPlaylistId}`);
+      if (fromApi.episodes && fromApi.episodes.length > 0) {
+        return fromApi;
+      }
+    }
+
+    try {
+      const rawVideosTab = await ytInnertubeFetch("browse", {
+        browseId: channelId,
+        params: "EgZ2aWRlb3PyBgQKAjoA"
+      });
+      const channelTitle = (rawVideosTab && rawVideosTab.metadata && rawVideosTab.metadata.channelMetadataRenderer && rawVideosTab.metadata.channelMetadataRenderer.title) || "Videos del canal";
+      const epList = extractEpisodesFromBrowseRoot(rawVideosTab, `Canal: ${channelTitle}`);
+      if (epList.length > 0) {
+        return {
+          series: { title: channelTitle },
+          episodes: epList
+        };
+      }
+    } catch (err) {
+      kino.log("Aviso en pestaña videos del canal:", String(err));
     }
 
     if (channelId.startsWith("UC") && channelId.length > 4) {
@@ -622,21 +668,9 @@ export async function episodes(ref) {
       }
     }
 
-    const searchPage = await fetchItemsByQuery(channelId, { searchType: "video", maxResults: 25 });
-    const epList = (searchPage.items || [])
-      .filter(it => it.ref.startsWith("video:"))
-      .map((it, idx) => ({
-        season: 1,
-        number: idx + 1,
-        ref: it.ref,
-        title: it.title,
-        still: it.poster,
-        overview: it.overview
-      }));
-
     return {
       series: { title: "Videos del canal" },
-      episodes: epList
+      episodes: []
     };
   }
 
@@ -663,7 +697,7 @@ function extractVideoId(ref) {
   return clean;
 }
 
-function extractSubtitlesAndAudio(data, prefLang) {
+function extractSubtitles(data, prefLang) {
   const subList = [];
   const captionTracks = data
     && data.captions
@@ -680,7 +714,7 @@ function extractSubtitlesAndAudio(data, prefLang) {
       if (langCode === prefLang || langCode.startsWith(prefLang + "-")) {
         hasPrefSub = true;
       }
-      if (track.isTranslatable && !translatableTrack) {
+      if (track.isTranslatable && (langCode.startsWith("en") || !translatableTrack)) {
         translatableTrack = track;
       }
       const vttUrl = track.baseUrl.includes("fmt=")
@@ -715,39 +749,7 @@ function extractSubtitlesAndAudio(data, prefLang) {
     });
   }
 
-  const audioList = [];
-  const seenAudio = new Set();
-  const adaptive = (data && data.streamingData && Array.isArray(data.streamingData.adaptiveFormats))
-    ? data.streamingData.adaptiveFormats
-    : [];
-
-  const audioFormats = adaptive
-    .filter(f => f && typeof f.url === "string" && f.url.startsWith("https://") && String(f.mimeType || "").startsWith("audio/"))
-    .sort((a, b) => (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0));
-
-  for (const fmt of audioFormats) {
-    const trackInfo = fmt.audioTrack || {};
-    const rawId = String(trackInfo.id || "");
-    const langCode = rawId ? rawId.split(".")[0] : "";
-    const label = trackInfo.displayName || langCode || "Audio original";
-    const key = langCode || label;
-    if (seenAudio.has(key)) continue;
-    seenAudio.add(key);
-
-    audioList.push({
-      lang: langCode || prefLang,
-      url: fmt.url,
-      label: trackInfo.audioIsDefault ? label + " (Predeterminado)" : label
-    });
-  }
-
-  audioList.sort((a, b) => {
-    const aPref = (a.lang === prefLang || a.lang.startsWith(prefLang + "-")) ? 0 : 1;
-    const bPref = (b.lang === prefLang || b.lang.startsWith(prefLang + "-")) ? 0 : 1;
-    return aPref - bPref;
-  });
-
-  return { subtitles: subList, audioTracks: audioList };
+  return subList;
 }
 
 export async function resolve(ref) {
@@ -762,6 +764,8 @@ export async function resolve(ref) {
   });
 
   const prefLang = getPreferredLang();
+  const region = getRegionCode();
+
   const clients = [
     {
       clientName: "IOS",
@@ -775,16 +779,29 @@ export async function resolve(ref) {
     {
       clientName: "ANDROID_VR",
       clientVersion: "1.61.48",
+      deviceMake: "Oculus",
+      deviceModel: "Quest 3",
       osName: "Android",
-      osVersion: "14",
-      userAgent: "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 14; es_AR) gzip"
+      osVersion: "12L",
+      androidSdkVersion: 32,
+      userAgent: "com.google.android.apps.youtube.vr.oculus/1.61.48 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
     },
     {
-      clientName: "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
-      clientVersion: "2.0",
-      userAgent: "Mozilla/5.0 (PlayStation; PlayStation 5/2.26) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0 Safari/605.1.15"
+      clientName: "ANDROID",
+      clientVersion: "20.10.38",
+      deviceMake: "Google",
+      deviceModel: "Pixel 8",
+      osName: "Android",
+      osVersion: "14",
+      androidSdkVersion: 34,
+      userAgent: "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip"
     }
   ];
+
+  let hlsCandidate = null;
+  const progressiveCandidates = [];
+  let collectedSubtitles = [];
+  let minExpires = 21600;
 
   for (const client of clients) {
     try {
@@ -798,11 +815,9 @@ export async function resolve(ref) {
             deviceModel: client.deviceModel,
             osName: client.osName,
             osVersion: client.osVersion,
+            androidSdkVersion: client.androidSdkVersion,
             hl: prefLang,
-            gl: getRegionCode()
-          },
-          thirdParty: {
-            embedUrl: "https://www.youtube.com/"
+            gl: region
           }
         },
         contentCheckOk: true,
@@ -824,75 +839,75 @@ export async function resolve(ref) {
       const streamingData = data && data.streamingData;
       if (!streamingData) continue;
 
-      const { subtitles, audioTracks } = extractSubtitlesAndAudio(data, prefLang);
+      if (Number(streamingData.expiresInSeconds) > 0) {
+        minExpires = Math.min(minExpires, Number(streamingData.expiresInSeconds));
+      }
 
-      const alternatives = [];
-      const combinedFormats = [
-        ...(Array.isArray(streamingData.formats) ? streamingData.formats : []),
-        ...(Array.isArray(streamingData.adaptiveFormats) ? streamingData.adaptiveFormats : [])
-      ].filter(f => f && typeof f.url === "string" && f.url.startsWith("https://"));
+      if (collectedSubtitles.length === 0) {
+        collectedSubtitles = extractSubtitles(data, prefLang);
+      }
 
-      for (const fmt of combinedFormats) {
+      if (!hlsCandidate && typeof streamingData.hlsManifestUrl === "string" && streamingData.hlsManifestUrl.startsWith("https://")) {
+        hlsCandidate = {
+          url: streamingData.hlsManifestUrl,
+          mime: "application/x-mpegURL",
+          headers: { "User-Agent": client.userAgent },
+          label: "HLS Adaptativo (Full HD / Multi-audio)"
+        };
+      }
+
+      const progFormats = (Array.isArray(streamingData.formats) ? streamingData.formats : [])
+        .filter(f => f && typeof f.url === "string" && f.url.startsWith("https://"))
+        .sort((a, b) => (Number(b.height) || 0) - (Number(a.height) || 0));
+
+      for (const fmt of progFormats) {
         const mimeType = String(fmt.mimeType || "").split(";")[0].trim() || "video/mp4";
-        if (mimeType.startsWith("video/")) {
-          alternatives.push({
+        const quality = fmt.qualityLabel || `${fmt.height || 360}p`;
+        const label = `${quality} MP4 (${client.clientName})`;
+        if (!progressiveCandidates.some(p => p.url === fmt.url)) {
+          progressiveCandidates.push({
             url: fmt.url,
             mime: mimeType,
-            label: fmt.qualityLabel || fmt.quality || "MP4"
+            headers: { "User-Agent": client.userAgent },
+            label
           });
         }
       }
 
-      if (typeof streamingData.hlsManifestUrl === "string" && streamingData.hlsManifestUrl.startsWith("https://")) {
-        return {
-          url: streamingData.hlsManifestUrl,
-          mime: "application/x-mpegURL",
-          headers: { "User-Agent": client.userAgent },
-          subtitles: subtitles.length > 0 ? subtitles : undefined,
-          audioTracks: audioTracks.length > 0 ? audioTracks : undefined,
-          alternatives: alternatives.length > 0 ? alternatives.slice(0, 5) : undefined,
-          expiresInSeconds: Number(streamingData.expiresInSeconds) || 21600
-        };
+      if (hlsCandidate && progressiveCandidates.length > 0) {
+        break;
       }
-
-      const progressiveFormats = (Array.isArray(streamingData.formats) ? streamingData.formats : [])
-        .filter(f => f && typeof f.url === "string" && f.url.startsWith("https://"))
-        .sort((a, b) => (Number(b.height) || 0) - (Number(a.height) || 0));
-
-      if (progressiveFormats.length > 0) {
-        const best = progressiveFormats[0];
-        return {
-          url: best.url,
-          mime: "video/mp4",
-          headers: { "User-Agent": client.userAgent },
-          subtitles: subtitles.length > 0 ? subtitles : undefined,
-          audioTracks: audioTracks.length > 0 ? audioTracks : undefined,
-          alternatives: progressiveFormats.slice(1).map(f => ({
-            url: f.url,
-            mime: "video/mp4",
-            label: f.qualityLabel || "MP4"
-          })),
-          expiresInSeconds: Number(streamingData.expiresInSeconds) || 21600
-        };
-      }
-
-      if (alternatives.length > 0) {
-        return {
-          url: alternatives[0].url,
-          mime: alternatives[0].mime || "video/mp4",
-          headers: { "User-Agent": client.userAgent },
-          subtitles: subtitles.length > 0 ? subtitles : undefined,
-          audioTracks: audioTracks.length > 0 ? audioTracks : undefined,
-          alternatives: alternatives.slice(1, 5),
-          expiresInSeconds: Number(streamingData.expiresInSeconds) || 21600
-        };
-      }
-
-      await kino.sleep(100);
     } catch (err) {
       kino.log(`Aviso en cliente ${client.clientName}:`, String(err));
     }
   }
 
-  throw new Error(`No se encontró un flujo reproducible directo para el video ${videoId}`);
+  const allStreams = [];
+  if (hlsCandidate) {
+    allStreams.push(hlsCandidate);
+  }
+  for (const prog of progressiveCandidates) {
+    allStreams.push(prog);
+  }
+
+  if (allStreams.length === 0) {
+    throw new Error(`No se encontró un flujo reproducible directo para el video ${videoId}`);
+  }
+
+  const primary = allStreams[0];
+  const alternatives = allStreams.slice(1).map(s => ({
+    url: s.url,
+    mime: s.mime,
+    headers: s.headers,
+    label: s.label
+  }));
+
+  return {
+    url: primary.url,
+    mime: primary.mime,
+    headers: primary.headers,
+    subtitles: collectedSubtitles.length > 0 ? collectedSubtitles : undefined,
+    alternatives: alternatives.length > 0 ? alternatives : undefined,
+    expiresInSeconds: minExpires
+  };
 }

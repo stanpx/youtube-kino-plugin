@@ -1,7 +1,7 @@
 {
   "id": "youtube-player",
   "name": "YouTube Player",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "apiVersion": 6,
   "entry": "plugin.js",
   "description": "Busca y reproduce videos públicos de YouTube utilizando la API oficial de Google de forma directa.",
@@ -55,6 +55,6 @@
   ],
   "signature": {
     "authorKey": "6f5fc734f744d974a1fe0c21a0e7edf6e0c9ff2e35a01ffc12d9abad629d55ef",
-    "value": "7169eb8d17e0aaee2bc300db618e49ad428a82e1f64cc08e4e8718cfebfad922cd0ff523c7fea3b066acda12f40cfa0ef7fde24c837714d8482583c190cde00a"
+    "value": "5b3456b2e4ac3015f55aa63457b45a16db43c78dba28dde363804f15b41a8748f5d5500a14f0a1d0fb83f0b6e17dee8b19651b9a0cb1d386eb4141097e4d340c"
   }
 }
