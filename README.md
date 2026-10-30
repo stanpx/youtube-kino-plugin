@@ -14,3 +14,4 @@ Agrega el repositorio en Kino TV:
 - **Búsqueda (search)**: Búsqueda directa de videos, listas de reproducción públicas y canales.
 - **Exploración (browse y episodes)**: Navegación por categorías, listas de reproducción y subidas de canales.
 - **Reproducción (resolve)**: Resolución directa de flujos HLS (.m3u8) y MP4 con soporte de subtítulos VTT.
+- **Respaldo automático (Frontends)**: Espejos de **Invidious** (`invidious.nerdvpn.de`, `inv.nadeko.net`, `invidious.tiekoetter.com`) y **Piped** (`cf.piped.video`, `piped.ducks.party`, `piped.kavin.rocks`, `piped.wireway.ch`) para búsqueda, exploración y reproducción resiliente.

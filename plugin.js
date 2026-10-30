@@ -2,6 +2,26 @@ const YT_API_BASE = "https://www.googleapis.com/youtube/v3";
 const YT_INNERTUBE_BASE = "https://www.youtube.com/youtubei/v1";
 const OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
 
+/**
+ * Plan B - Instancias de respaldo automático de Invidious y Piped
+ * en caso de limitaciones o fallos de YouTube directo.
+ */
+const INVIDIOUS_MIRRORS = [
+  "https://invidious.nerdvpn.de",
+  "https://inv.nadeko.net",
+  "https://invidious.tiekoetter.com"
+];
+
+const PIPED_INSTANCES = [
+  "https://cf.piped.video",
+  "https://pipedapi.ducks.party",
+  "https://piped.ducks.party",
+  "https://pipedapi.kavin.rocks",
+  "https://piped.kavin.rocks",
+  "https://pipedapi.wireway.ch",
+  "https://piped.wireway.ch"
+];
+
 const HOME_CATEGORIES = [
   { id: "trending", title: "Tendencias en YouTube", ref: "cat:trending", query: "tendencias tecnologia musica cine", genre: "entretenimiento" },
   { id: "music", title: "Música y Conciertos", ref: "cat:music", query: "official music video live concert", videoCategoryId: "10", genre: "musica" },
@@ -380,15 +400,238 @@ function mapInnertubeEntry(entry) {
   return null;
 }
 
+function mapInvidiousSearchItem(v) {
+  if (!v || typeof v !== "object") return null;
+  const itemType = String(v.type || "video").toLowerCase();
+
+  if (itemType === "playlist" || v.playlistId) {
+    const playlistId = v.playlistId;
+    if (!playlistId) return null;
+    const poster = v.playlistThumbnail || selectThumbnail(v.videos && v.videos[0] && v.videos[0].videoThumbnails);
+    return {
+      id: `yt-pl-${playlistId}`,
+      ref: `playlist:${playlistId}`,
+      title: v.title || `Lista ${playlistId}`,
+      kind: "series",
+      poster,
+      backdrop: poster,
+      overview: v.author ? `Lista de reproducción · ${v.author}` : "Lista de reproducción de YouTube"
+    };
+  }
+
+  if (itemType === "channel" || (v.authorId && !v.videoId)) {
+    const channelId = v.authorId;
+    if (!channelId) return null;
+    const poster = selectThumbnail(v.authorThumbnails);
+    return {
+      id: `yt-ch-${channelId}`,
+      ref: `channel:${channelId}`,
+      title: v.author || v.title || `Canal ${channelId}`,
+      kind: "series",
+      poster,
+      backdrop: poster,
+      overview: v.description || "Canal público de YouTube"
+    };
+  }
+
+  const videoId = v.videoId;
+  if (!videoId) return null;
+  const isLive = Boolean(v.liveNow);
+  return {
+    id: `yt-v-${videoId}`,
+    ref: `video:${videoId}`,
+    title: v.title || `Video ${videoId}`,
+    kind: isLive ? "live" : "movie",
+    poster: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+    backdrop: `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
+    overview: v.description || (v.author ? `Canal: ${v.author}` : "")
+  };
+}
+
+async function searchViaInvidious(queryText, searchType = "video", region = "AR") {
+  const encoded = encodeURIComponent(queryText.trim());
+  let invType = "all";
+  if (searchType === "video") invType = "video";
+  else if (searchType === "playlist") invType = "playlist";
+  else if (searchType === "channel") invType = "channel";
+
+  for (const inv of INVIDIOUS_MIRRORS) {
+    try {
+      const res = await kino.fetch(
+        `${inv}/api/v1/search?q=${encoded}&type=${invType}&region=${region}`,
+        {
+          headers: {
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 KinoPlugin"
+          }
+        }
+      );
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (!Array.isArray(data) || data.length === 0) continue;
+
+      const items = [];
+      const seen = new Set();
+      for (const entry of data) {
+        const mapped = mapInvidiousSearchItem(entry);
+        if (mapped && !seen.has(mapped.id)) {
+          seen.add(mapped.id);
+          items.push(mapped);
+        }
+      }
+      if (items.length > 0) return items;
+    } catch (err) {
+      kino.log(`Aviso en búsqueda Invidious (${inv}):`, String(err));
+    }
+  }
+  return [];
+}
+
+function mapPipedSearchItem(st) {
+  if (!st || typeof st !== "object") return null;
+  const url = String(st.url || "");
+  const itemType = String(st.type || "").toLowerCase();
+
+  if (itemType === "playlist" || url.includes("list=")) {
+    const plMatch = url.match(/[?&]list=([A-Za-z0-9_-]+)/);
+    const playlistId = plMatch ? plMatch[1] : "";
+    if (!playlistId) return null;
+    const poster = st.thumbnail || "https://www.youtube.com/img/desktop/yt_1200.png";
+    return {
+      id: `yt-pl-${playlistId}`,
+      ref: `playlist:${playlistId}`,
+      title: st.name || st.title || `Lista ${playlistId}`,
+      kind: "series",
+      poster,
+      backdrop: poster,
+      overview: st.uploaderName ? `Lista de reproducción · ${st.uploaderName}` : "Lista de reproducción de YouTube"
+    };
+  }
+
+  if (itemType === "channel" || url.startsWith("/channel/")) {
+    const chMatch = url.match(/\/channel\/(UC[A-Za-z0-9_-]{22})/);
+    const channelId = chMatch ? chMatch[1] : "";
+    if (!channelId) return null;
+    const poster = st.thumbnail || "https://www.youtube.com/img/desktop/yt_1200.png";
+    return {
+      id: `yt-ch-${channelId}`,
+      ref: `channel:${channelId}`,
+      title: st.name || st.title || `Canal ${channelId}`,
+      kind: "series",
+      poster,
+      backdrop: poster,
+      overview: st.description || "Canal público de YouTube"
+    };
+  }
+
+  const vidMatch = url.match(/(?:v=|\/watch\?v=|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+  const videoId = vidMatch ? vidMatch[1] : "";
+  if (!videoId) return null;
+  return {
+    id: `yt-v-${videoId}`,
+    ref: `video:${videoId}`,
+    title: st.title || st.name || `Video ${videoId}`,
+    kind: st.isShort ? "movie" : "movie",
+    poster: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+    backdrop: `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
+    overview: st.shortDescription || (st.uploaderName ? `Canal: ${st.uploaderName}` : "")
+  };
+}
+
+async function searchViaPiped(queryText, searchType = "video") {
+  const encoded = encodeURIComponent(queryText.trim());
+  let filter = "all";
+  if (searchType === "video") filter = "videos";
+  else if (searchType === "playlist") filter = "playlists";
+  else if (searchType === "channel") filter = "channels";
+
+  for (const piped of PIPED_INSTANCES) {
+    try {
+      const endpoints = [
+        `${piped}/search?q=${encoded}&filter=${filter}`,
+        `${piped}/results?search_query=${encoded}`
+      ];
+      for (const endpoint of endpoints) {
+        try {
+          const res = await kino.fetch(endpoint, {
+            headers: {
+              "Accept": "application/json",
+              "User-Agent": "Mozilla/5.0 KinoPlugin"
+            }
+          });
+          if (!res.ok) continue;
+          const data = await res.json();
+          const rawItems = Array.isArray(data) ? data : (data && Array.isArray(data.items) ? data.items : []);
+          if (rawItems.length === 0) continue;
+
+          const items = [];
+          const seen = new Set();
+          for (const st of rawItems) {
+            const mapped = mapPipedSearchItem(st);
+            if (mapped && !seen.has(mapped.id)) {
+              seen.add(mapped.id);
+              items.push(mapped);
+            }
+          }
+          if (items.length > 0) return items;
+        } catch (_) {}
+      }
+    } catch (err) {
+      kino.log(`Aviso en búsqueda Piped (${piped}):`, String(err));
+    }
+  }
+  return [];
+}
+
+async function fetchTrendingFallback(region = "AR") {
+  for (const inv of INVIDIOUS_MIRRORS) {
+    try {
+      const res = await kino.fetch(`${inv}/api/v1/trending?region=${region}`, {
+        headers: {
+          "Accept": "application/json",
+          "User-Agent": "Mozilla/5.0 KinoPlugin"
+        }
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (Array.isArray(data) && data.length > 0) {
+        const items = data.map(mapInvidiousSearchItem).filter(Boolean);
+        if (items.length > 0) return items;
+      }
+    } catch (_) {}
+  }
+
+  for (const piped of PIPED_INSTANCES) {
+    try {
+      const res = await kino.fetch(`${piped}/trending?region=${region}`, {
+        headers: {
+          "Accept": "application/json",
+          "User-Agent": "Mozilla/5.0 KinoPlugin"
+        }
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (Array.isArray(data) && data.length > 0) {
+        const items = data.map(mapPipedSearchItem).filter(Boolean);
+        if (items.length > 0) return items;
+      }
+    } catch (_) {}
+  }
+
+  return [];
+}
+
 async function fetchItemsByQuery(queryText, options = {}) {
   const { searchType = "video,playlist,channel", pageToken = "", maxResults = 18, videoCategoryId = "" } = options;
+  const region = getRegionCode();
 
+  // Plan A.1: YouTube Data API v3
   const apiParams = {
     part: "snippet",
     q: queryText,
     type: searchType,
     maxResults: String(maxResults),
-    regionCode: getRegionCode()
+    regionCode: region
   };
   if (pageToken) apiParams.pageToken = pageToken;
   if (videoCategoryId && searchType === "video") apiParams.videoCategoryId = videoCategoryId;
@@ -396,37 +639,61 @@ async function fetchItemsByQuery(queryText, options = {}) {
   const apiData = await ytDataApiFetch("search", apiParams);
   if (apiData && Array.isArray(apiData.items) && apiData.items.length > 0) {
     const items = apiData.items.map(mapDataApiItem).filter(Boolean);
-    return {
-      items,
-      next: apiData.nextPageToken || undefined
-    };
-  }
-
-  const innertubePayload = { query: queryText };
-  if (searchType === "playlist") {
-    innertubePayload.params = "EgIQAw%3D%3D";
-  } else if (searchType === "channel") {
-    innertubePayload.params = "EgIQAg%3D%3D";
-  }
-
-  const raw = await ytInnertubeFetch("search", innertubePayload);
-  const renderers = collectInnertubeRenderers(raw);
-  const seen = new Set();
-  const items = [];
-  for (const r of renderers) {
-    const mapped = mapInnertubeEntry(r);
-    if (mapped && !seen.has(mapped.id)) {
-      seen.add(mapped.id);
-      items.push(mapped);
+    if (items.length > 0) {
+      return {
+        items,
+        next: apiData.nextPageToken || undefined
+      };
     }
   }
-  return { items };
+
+  // Plan A.2: YouTube Innertube directo
+  try {
+    const innertubePayload = { query: queryText };
+    if (searchType === "playlist") {
+      innertubePayload.params = "EgIQAw%3D%3D";
+    } else if (searchType === "channel") {
+      innertubePayload.params = "EgIQAg%3D%3D";
+    }
+
+    const raw = await ytInnertubeFetch("search", innertubePayload);
+    const renderers = collectInnertubeRenderers(raw);
+    const seen = new Set();
+    const items = [];
+    for (const r of renderers) {
+      const mapped = mapInnertubeEntry(r);
+      if (mapped && !seen.has(mapped.id)) {
+        seen.add(mapped.id);
+        items.push(mapped);
+      }
+    }
+    if (items.length > 0) {
+      return { items };
+    }
+  } catch (err) {
+    kino.log("Aviso en búsqueda Innertube:", String(err));
+  }
+
+  // Plan B.1: Invidious (invidious.nerdvpn.de, inv.nadeko.net, invidious.tiekoetter.com)
+  const invItems = await searchViaInvidious(queryText, searchType, region);
+  if (invItems.length > 0) {
+    return { items: invItems.slice(0, maxResults) };
+  }
+
+  // Plan B.2: Piped (cf.piped.video, piped.ducks.party, piped.kavin.rocks, piped.wireway.ch)
+  const pipedItems = await searchViaPiped(queryText, searchType);
+  if (pipedItems.length > 0) {
+    return { items: pipedItems.slice(0, maxResults) };
+  }
+
+  return { items: [] };
 }
 
 export async function home() {
   const rows = [];
   const region = getRegionCode();
 
+  let trendingItems = [];
   const popularData = await ytDataApiFetch("videos", {
     part: "snippet",
     chart: "mostPopular",
@@ -435,16 +702,19 @@ export async function home() {
   });
 
   if (popularData && Array.isArray(popularData.items) && popularData.items.length > 0) {
-    const items = popularData.items.map(mapDataApiItem).filter(Boolean);
-    if (items.length > 0) {
-      rows.push({
-        id: "trending",
-        title: "Tendencias en YouTube",
-        ref: "cat:trending",
-        genre: "entretenimiento",
-        items
-      });
-    }
+    trendingItems = popularData.items.map(mapDataApiItem).filter(Boolean);
+  } else {
+    trendingItems = (await fetchTrendingFallback(region)).slice(0, 15);
+  }
+
+  if (trendingItems.length > 0) {
+    rows.push({
+      id: "trending",
+      title: "Tendencias en YouTube",
+      ref: "cat:trending",
+      genre: "entretenimiento",
+      items: trendingItems
+    });
   }
 
   const categoriesToLoad = rows.length > 0 ? HOME_CATEGORIES.slice(1, 5) : HOME_CATEGORIES.slice(0, 4);
@@ -493,10 +763,11 @@ export async function browse(ref, cursor) {
   const foundCat = HOME_CATEGORIES.find(c => c.id === catId || c.ref === cleanRef) || HOME_CATEGORIES[0];
 
   if (foundCat.id === "trending" && !cursor) {
+    const region = getRegionCode();
     const popularData = await ytDataApiFetch("videos", {
       part: "snippet",
       chart: "mostPopular",
-      regionCode: getRegionCode(),
+      regionCode: region,
       maxResults: "20"
     });
     if (popularData && Array.isArray(popularData.items) && popularData.items.length > 0) {
@@ -504,6 +775,10 @@ export async function browse(ref, cursor) {
         items: popularData.items.map(mapDataApiItem).filter(Boolean),
         next: popularData.nextPageToken || undefined
       };
+    }
+    const fallbackTrending = await fetchTrendingFallback(region);
+    if (fallbackTrending.length > 0) {
+      return { items: fallbackTrending.slice(0, 20) };
     }
   }
 
@@ -569,6 +844,162 @@ function extractEpisodesFromBrowseRoot(raw, fallbackOverview = "") {
   return epList;
 }
 
+async function fetchPlaylistEpisodesFallback(playlistId) {
+  for (const inv of INVIDIOUS_MIRRORS) {
+    try {
+      const res = await kino.fetch(`${inv}/api/v1/playlists/${playlistId}`, {
+        headers: {
+          "Accept": "application/json",
+          "User-Agent": "Mozilla/5.0 KinoPlugin"
+        }
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const videos = data && Array.isArray(data.videos) ? data.videos : [];
+      if (videos.length === 0) continue;
+
+      const epList = [];
+      const seen = new Set();
+      for (const v of videos) {
+        if (!v || !v.videoId || seen.has(v.videoId)) continue;
+        seen.add(v.videoId);
+        epList.push({
+          season: 1,
+          number: epList.length + 1,
+          ref: `video:${v.videoId}`,
+          title: v.title || `Episodio ${epList.length + 1}`,
+          still: `https://i.ytimg.com/vi/${v.videoId}/hqdefault.jpg`,
+          overview: v.author ? `Canal: ${v.author}` : ""
+        });
+      }
+      if (epList.length > 0) {
+        return {
+          series: { title: data.title || "Lista de reproducción de YouTube" },
+          episodes: epList
+        };
+      }
+    } catch (_) {}
+  }
+
+  for (const piped of PIPED_INSTANCES) {
+    try {
+      const res = await kino.fetch(`${piped}/playlists/${playlistId}`, {
+        headers: {
+          "Accept": "application/json",
+          "User-Agent": "Mozilla/5.0 KinoPlugin"
+        }
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const streams = data && Array.isArray(data.relatedStreams) ? data.relatedStreams : [];
+      if (streams.length === 0) continue;
+
+      const epList = [];
+      const seen = new Set();
+      for (const st of streams) {
+        if (!st) continue;
+        const vid = extractVideoId(st.url || "");
+        if (!vid || vid.length !== 11 || seen.has(vid)) continue;
+        seen.add(vid);
+        epList.push({
+          season: 1,
+          number: epList.length + 1,
+          ref: `video:${vid}`,
+          title: st.title || `Episodio ${epList.length + 1}`,
+          still: `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`,
+          overview: st.shortDescription || (st.uploaderName ? `Canal: ${st.uploaderName}` : "")
+        });
+      }
+      if (epList.length > 0) {
+        return {
+          series: { title: data.name || "Lista de reproducción de YouTube" },
+          episodes: epList
+        };
+      }
+    } catch (_) {}
+  }
+
+  return null;
+}
+
+async function fetchChannelEpisodesFallback(channelId) {
+  for (const inv of INVIDIOUS_MIRRORS) {
+    try {
+      const res = await kino.fetch(`${inv}/api/v1/channels/${channelId}/videos`, {
+        headers: {
+          "Accept": "application/json",
+          "User-Agent": "Mozilla/5.0 KinoPlugin"
+        }
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const rawVideos = Array.isArray(data) ? data : (data && Array.isArray(data.videos) ? data.videos : []);
+      if (rawVideos.length === 0) continue;
+
+      const epList = [];
+      const seen = new Set();
+      for (const v of rawVideos) {
+        if (!v || !v.videoId || seen.has(v.videoId)) continue;
+        seen.add(v.videoId);
+        epList.push({
+          season: 1,
+          number: epList.length + 1,
+          ref: `video:${v.videoId}`,
+          title: v.title || `Episodio ${epList.length + 1}`,
+          still: `https://i.ytimg.com/vi/${v.videoId}/hqdefault.jpg`,
+          overview: v.description || (v.author ? `Canal: ${v.author}` : "")
+        });
+      }
+      if (epList.length > 0) {
+        return {
+          series: { title: (rawVideos[0] && rawVideos[0].author) || "Videos del canal" },
+          episodes: epList
+        };
+      }
+    } catch (_) {}
+  }
+
+  for (const piped of PIPED_INSTANCES) {
+    try {
+      const res = await kino.fetch(`${piped}/channel/${channelId}`, {
+        headers: {
+          "Accept": "application/json",
+          "User-Agent": "Mozilla/5.0 KinoPlugin"
+        }
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const streams = data && Array.isArray(data.relatedStreams) ? data.relatedStreams : [];
+      if (streams.length === 0) continue;
+
+      const epList = [];
+      const seen = new Set();
+      for (const st of streams) {
+        if (!st) continue;
+        const vid = extractVideoId(st.url || "");
+        if (!vid || vid.length !== 11 || seen.has(vid)) continue;
+        seen.add(vid);
+        epList.push({
+          season: 1,
+          number: epList.length + 1,
+          ref: `video:${vid}`,
+          title: st.title || `Episodio ${epList.length + 1}`,
+          still: `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`,
+          overview: st.shortDescription || (data.name ? `Canal: ${data.name}` : "")
+        });
+      }
+      if (epList.length > 0) {
+        return {
+          series: { title: data.name || "Videos del canal" },
+          episodes: epList
+        };
+      }
+    } catch (_) {}
+  }
+
+  return null;
+}
+
 export async function episodes(ref) {
   const rawRef = String(ref || "").trim();
 
@@ -616,6 +1047,9 @@ export async function episodes(ref) {
     } catch (err) {
       kino.log("Aviso en browse de playlist:", String(err));
     }
+
+    const fallbackPl = await fetchPlaylistEpisodesFallback(playlistId);
+    if (fallbackPl) return fallbackPl;
 
     return {
       series: { title: "Lista de reproducción de YouTube" },
@@ -667,6 +1101,9 @@ export async function episodes(ref) {
         return fromUploads;
       }
     }
+
+    const fallbackCh = await fetchChannelEpisodesFallback(channelId);
+    if (fallbackCh) return fallbackCh;
 
     return {
       series: { title: "Videos del canal" },
@@ -752,6 +1189,175 @@ function extractSubtitles(data, prefLang) {
   return subList;
 }
 
+/**
+ * Plan B.1 de reproducción: Invidious (invidious.nerdvpn.de, inv.nadeko.net, invidious.tiekoetter.com).
+ */
+async function resolveViaInvidious(videoId) {
+  for (const inv of INVIDIOUS_MIRRORS) {
+    try {
+      const res = await kino.fetch(`${inv}/api/v1/videos/${videoId}`, {
+        headers: {
+          "Accept": "application/json",
+          "User-Agent": "Mozilla/5.0 KinoPlugin"
+        }
+      });
+
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (!data || typeof data !== "object") continue;
+
+      const subList = [];
+      if (Array.isArray(data.captions)) {
+        for (const cap of data.captions) {
+          if (cap && typeof cap.url === "string") {
+            const subUrl = cap.url.startsWith("http") ? cap.url : `${inv}${cap.url}`;
+            subList.push({
+              lang: cap.language_code || cap.languageCode || "es",
+              label: cap.label || "Subtítulo",
+              url: subUrl,
+              format: "vtt"
+            });
+          }
+        }
+      }
+
+      const candidates = [];
+
+      if (typeof data.hlsUrl === "string" && data.hlsUrl.startsWith("http")) {
+        candidates.push({
+          url: data.hlsUrl.startsWith("https://") ? data.hlsUrl : `${inv}${data.hlsUrl}`,
+          mime: "application/x-mpegURL",
+          headers: { "User-Agent": "Mozilla/5.0" },
+          label: "HLS (Invidious)"
+        });
+      }
+
+      if (Array.isArray(data.formatStreams)) {
+        const sorted = [...data.formatStreams]
+          .filter(f => f && typeof f.url === "string")
+          .sort((a, b) => (parseInt(String(b.resolution || "0"), 10) || 0) - (parseInt(String(a.resolution || "0"), 10) || 0));
+
+        for (const fmt of sorted) {
+          const streamUrl = fmt.url.startsWith("http") ? fmt.url : `${inv}${fmt.url}`;
+          const mime = String(fmt.type || "video/mp4").split(";")[0].trim() || "video/mp4";
+          candidates.push({
+            url: streamUrl,
+            mime,
+            headers: { "User-Agent": "Mozilla/5.0" },
+            label: `${fmt.qualityLabel || fmt.resolution || "MP4"} (Invidious)`
+          });
+        }
+      }
+
+      candidates.push({
+        url: `${inv}/latest_version?id=${videoId}&itag=18`,
+        mime: "video/mp4",
+        headers: { "User-Agent": "Mozilla/5.0" },
+        label: "360p Directo (Invidious)"
+      });
+
+      if (candidates.length > 0) {
+        const primary = candidates[0];
+        const alternatives = candidates.slice(1, 9);
+        return {
+          url: primary.url,
+          mime: primary.mime,
+          headers: primary.headers,
+          subtitles: subList.length > 0 ? subList.slice(0, 30) : undefined,
+          alternatives: alternatives.length > 0 ? alternatives : undefined,
+          expiresInSeconds: 10800
+        };
+      }
+    } catch (_) {
+      // Probar siguiente espejo de Invidious
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Plan B.2 de reproducción: Piped (cf.piped.video, piped.ducks.party, piped.kavin.rocks, piped.wireway.ch).
+ */
+async function resolveViaPiped(videoId) {
+  for (const piped of PIPED_INSTANCES) {
+    try {
+      const res = await kino.fetch(`${piped}/streams/${videoId}`, {
+        headers: {
+          "Accept": "application/json",
+          "User-Agent": "Mozilla/5.0 KinoPlugin"
+        }
+      });
+
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (!data || typeof data !== "object") continue;
+
+      const subList = [];
+      if (Array.isArray(data.subtitles)) {
+        for (const sub of data.subtitles) {
+          if (sub && typeof sub.url === "string" && sub.url.startsWith("https://")) {
+            subList.push({
+              lang: sub.code || "es",
+              label: sub.name || sub.code || "Subtítulo",
+              url: sub.url,
+              format: (sub.mimeType && sub.mimeType.includes("ttml")) ? "ttml" : "vtt"
+            });
+          }
+        }
+      }
+
+      const candidates = [];
+
+      if (typeof data.hls === "string" && data.hls.startsWith("https://")) {
+        candidates.push({
+          url: data.hls,
+          mime: "application/x-mpegURL",
+          headers: { "User-Agent": "Mozilla/5.0" },
+          label: "HLS (Piped)"
+        });
+      }
+
+      if (Array.isArray(data.videoStreams)) {
+        const withAudio = data.videoStreams
+          .filter(v => v && typeof v.url === "string" && v.url.startsWith("https://") && v.videoOnly === false)
+          .sort((a, b) => (Number(b.height) || 0) - (Number(a.height) || 0));
+
+        const anyVideo = data.videoStreams
+          .filter(v => v && typeof v.url === "string" && v.url.startsWith("https://") && v.videoOnly !== false)
+          .sort((a, b) => (Number(b.height) || 0) - (Number(a.height) || 0));
+
+        for (const v of [...withAudio, ...anyVideo]) {
+          const mime = String(v.mimeType || "video/mp4").split(";")[0].trim() || "video/mp4";
+          candidates.push({
+            url: v.url,
+            mime,
+            headers: { "User-Agent": "Mozilla/5.0" },
+            label: `${v.quality || (v.height ? v.height + "p" : "MP4")} (Piped)`
+          });
+        }
+      }
+
+      if (candidates.length > 0) {
+        const primary = candidates[0];
+        const alternatives = candidates.slice(1, 9);
+        return {
+          url: primary.url,
+          mime: primary.mime,
+          headers: primary.headers,
+          subtitles: subList.length > 0 ? subList.slice(0, 30) : undefined,
+          alternatives: alternatives.length > 0 ? alternatives : undefined,
+          expiresInSeconds: 10800
+        };
+      }
+    } catch (_) {
+      // Probar siguiente instancia de Piped
+    }
+  }
+
+  return null;
+}
+
 export async function resolve(ref) {
   const videoId = extractVideoId(ref);
   if (!videoId) {
@@ -803,6 +1409,7 @@ export async function resolve(ref) {
   let collectedSubtitles = [];
   let minExpires = 21600;
 
+  // Plan A: YouTube Innertube directo
   for (const client of clients) {
     try {
       const payload = {
@@ -890,24 +1497,55 @@ export async function resolve(ref) {
     allStreams.push(prog);
   }
 
-  if (allStreams.length === 0) {
-    throw new Error(`No se encontró un flujo reproducible directo para el video ${videoId}`);
+  if (allStreams.length > 0) {
+    const primary = allStreams[0];
+    const mirrorFallbacks = INVIDIOUS_MIRRORS.map(inv => ({
+      url: `${inv}/latest_version?id=${videoId}&itag=18`,
+      mime: "video/mp4",
+      headers: { "User-Agent": "Mozilla/5.0" },
+      label: `Respaldo Invidious (${inv.replace(/^https:\/\//, "")})`
+    }));
+    const alternatives = [...allStreams.slice(1), ...mirrorFallbacks].slice(0, 9).map(s => ({
+      url: s.url,
+      mime: s.mime,
+      headers: s.headers,
+      label: s.label
+    }));
+
+    return {
+      url: primary.url,
+      mime: primary.mime,
+      headers: primary.headers,
+      subtitles: collectedSubtitles.length > 0 ? collectedSubtitles : undefined,
+      alternatives: alternatives.length > 0 ? alternatives : undefined,
+      expiresInSeconds: minExpires
+    };
   }
 
-  const primary = allStreams[0];
-  const alternatives = allStreams.slice(1).map(s => ({
-    url: s.url,
-    mime: s.mime,
-    headers: s.headers,
-    label: s.label
+  // Plan B.1: Invidious API + streams
+  const invStream = await resolveViaInvidious(videoId);
+  if (invStream) {
+    return invStream;
+  }
+
+  // Plan B.2: Piped API
+  const pipedStream = await resolveViaPiped(videoId);
+  if (pipedStream) {
+    return pipedStream;
+  }
+
+  // Plan B.3: Último recurso directo a través de los mirrors de Invidious (latest_version)
+  const fallbackUrls = INVIDIOUS_MIRRORS.map(inv => ({
+    url: `${inv}/latest_version?id=${videoId}&itag=18`,
+    mime: "video/mp4",
+    headers: { "User-Agent": "Mozilla/5.0" },
+    label: `Invidious (${inv.replace(/^https:\/\//, "")})`
   }));
 
   return {
-    url: primary.url,
-    mime: primary.mime,
-    headers: primary.headers,
-    subtitles: collectedSubtitles.length > 0 ? collectedSubtitles : undefined,
-    alternatives: alternatives.length > 0 ? alternatives : undefined,
-    expiresInSeconds: minExpires
+    url: fallbackUrls[0].url,
+    mime: fallbackUrls[0].mime,
+    headers: fallbackUrls[0].headers,
+    alternatives: fallbackUrls.slice(1)
   };
 }
